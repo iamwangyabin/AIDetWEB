@@ -317,7 +317,7 @@ async function forwardToModal(modalConfig, file) {
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     res.setHeader('Allow', 'POST');
-    return res.status(405).end('Method Not Allowed');
+    return res.status(405).json({ message: 'Method Not Allowed' });
   }
 
   try {
@@ -327,7 +327,7 @@ export default async function handler(req, res) {
     const file = normalizeUploadedFile(files.file);
 
     if (!file) {
-      return res.status(400).end('File not provided');
+      return res.status(400).json({ message: 'File not provided' });
     }
 
     const modalConfig = getModalConfig(req, fields);
@@ -376,6 +376,8 @@ export default async function handler(req, res) {
     }
   } catch (error) {
     console.error('Upload parsing error:', error);
-    return res.status(500).end('Error parsing the uploaded file');
+    return res.status(500).json({
+      message: error?.message || 'Error parsing the uploaded file',
+    });
   }
 }

@@ -90,6 +90,20 @@ function getRiskTone(score) {
   return 'low';
 }
 
+async function readApiResponse(response) {
+  const text = await response.text();
+
+  if (!text) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { message: text };
+  }
+}
+
 export default function Home() {
   const inputRef = useRef(null);
   const [locale, setLocale] = useState('zh');
@@ -218,7 +232,7 @@ export default function Home() {
         body: formData,
       });
 
-      const data = await response.json();
+      const data = await readApiResponse(response);
 
       if (!response.ok) {
         throw new Error(data.message || 'Detection request failed');
