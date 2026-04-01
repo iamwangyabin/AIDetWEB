@@ -1,6 +1,6 @@
 import { IncomingForm } from 'formidable';
 import fs from 'fs/promises';
-import { consumeDetectionQuota, getSessionUser } from '../../lib/auth';
+import { consumeDetectionQuota, getRequestViewer } from '../../lib/auth';
 
 export const config = {
   api: {
@@ -26,6 +26,49 @@ function hashString(input) {
 
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
+}
+
+function toPercent(score) {
+  if (!Number.isFinite(score)) return 0;
+  const normalized = score > 1 ? score : score * 100;
+  return clamp(Math.round(normalized), 0, 100);
+}
+
+function firstValue(value) {
+  if (Array.isArray(value)) {
+    return value[0];
+  }
+
+  return value;
+}
+
+function parseTopK(rawValue) {
+  const parsed = Number.parseInt(String(rawValue || '5'), 10);
+  return clamp(Number.isFinite(parsed) ? parsed : 5, 1, 10);
+}
+
+function normalizeClassLabel(label) {
+  return String(label || '').trim();
+}
+
+function isRealLabel(label) {
+  const normalized = normalizeClassLabel(label).toLowerCase();
+  return normalized === 'all_real' || normalized === 'real' || normalized === 'authentic';
+}
+
+function formatModelLabel(label) {
+  return normalizeClassLabel(label).replace(/_/g, ' ');
+}
+
+function getModalConfig(req, fields) {
+  const topK = parseTopK(firstValue(req.query?.top_k) || firstValue(fields?.top_k) || process.env.MODAL_TOP_K);
+
+  return {
+    url: String(process.env.MODAL_DETECT_URL || '').trim(),
+    key: String(process.env.MODAL_KEY || '').trim(),
+    secret: String(process.env.MODAL_SECRET || '').trim(),
+    topK,
+  };
 }
 
 function formatBytes(bytes) {
@@ -149,34 +192,50 @@ function buildDemoDetection(file) {
   };
 }
 
-function normalizeLiveResponse(data, file) {
-  const confidenceValue = Number(data.confidence ?? data.score ?? 0.72);
-  const fakeProbability =
-    typeof data.riskScore === 'number'
-      ? clamp(data.riskScore, 0, 100)
-      : data.label === 'real'
-        ? clamp(Math.round((1 - confidenceValue) * 100), 0, 100)
-        : clamp(Math.round(confidenceValue * 100), 0, 100);
-  const isFake = data.label !== 'real' && fakeProbability >= 50;
+function normalizeLiveResponse(data, file, topK) {
+  const predictedLabel = normalizeClassLabel(data.predicted_label ?? data.label);
+  const predictedScore = Number(data.predicted_score ?? data.confidence ?? data.score ?? 0);
   const mediaKind = file.mimetype?.startsWith('video/') ? 'video' : 'image';
   const seed = hashString(
     `${file.originalFilename || 'upload'}-${file.size || 0}-${file.mimetype || 'application/octet-stream'}`
   );
-  const modelPredictions =
-    Array.isArray(data.modelPredictions) && data.modelPredictions.length > 0
-      ? data.modelPredictions.slice(0, 5)
-      : buildModelPredictions(seed, mediaKind, fakeProbability);
+  const rawPredictions = Array.isArray(data.predictions)
+    ? data.predictions
+    : Array.isArray(data.modelPredictions)
+      ? data.modelPredictions
+      : [];
+  const realPrediction = rawPredictions.find((item) => isRealLabel(item.label ?? item.name));
+  const realProbability = Number(realPrediction?.score);
+  const fakeProbability = Number.isFinite(realProbability)
+    ? clamp(Math.round((1 - realProbability) * 100), 0, 100)
+    : isRealLabel(predictedLabel)
+      ? clamp(Math.round((1 - predictedScore) * 100), 0, 100)
+      : clamp(Math.round(predictedScore * 100), 0, 100);
+  const isFake = !isRealLabel(predictedLabel);
+  const modelPredictions = rawPredictions.length > 0
+    ? rawPredictions.slice(0, topK).map((item, index) => ({
+        name: formatModelLabel(item.label ?? item.name ?? `Class ${index + 1}`),
+        score: toPercent(Number(item.score ?? 0)),
+      }))
+    : buildModelPredictions(seed, mediaKind, fakeProbability);
+  const confidence = clamp(Number(predictedScore.toFixed(4)), 0, 1);
+  const latencyMs = Number(data.latency_ms ?? data.processingMs ?? 0);
+  const backbone = normalizeClassLabel(data.backbone);
+  const device = normalizeClassLabel(data.device);
+  const numClasses = Number(data.num_classes);
 
   return {
-    mode: 'live',
+    mode: 'modal-live',
     label: isFake ? 'fake' : 'real',
-    confidence: clamp(Number((data.confidence ?? confidenceValue).toFixed(2)), 0, 1),
+    confidence,
     aiProbability: fakeProbability,
     riskScore: fakeProbability,
     authenticityScore: 100 - fakeProbability,
-    headline: isFake ? '模型返回了较高的伪造概率' : '模型返回了较低的伪造概率',
-    summary: '当前结果来自实际推理接口，前端会统一按产品化格式展示。',
-    processingMs: Number(data.processingMs ?? 0),
+    headline: isFake ? 'Modal 返回该素材更像 AI 生成内容' : 'Modal 返回该素材更接近真实内容',
+    summary: backbone
+      ? `当前结果来自 Modal 推理接口，主干模型为 ${backbone}。`
+      : '当前结果来自 Modal 推理接口，前端已按统一产品格式做展示。',
+    processingMs: Number.isFinite(latencyMs) ? latencyMs : 0,
     fileInfo: {
       name: file.originalFilename || 'upload',
       mimeType: file.mimetype || 'application/octet-stream',
@@ -184,24 +243,29 @@ function normalizeLiveResponse(data, file) {
       size: formatBytes(file.size || 0),
     },
     modelPredictions,
-    signals: Array.isArray(data.signals) && data.signals.length > 0
-      ? data.signals
-      : [
-          {
-            name: '模型置信度',
-            score: clamp(Math.round(confidenceValue * 100), 0, 100),
-            detail: '实际接口未提供更细的解释字段，已做统一兜底展示。',
-          },
-        ],
-    timeline: Array.isArray(data.timeline) && data.timeline.length > 0
-      ? data.timeline
-      : [
-          { title: '输入介质', value: file.mimetype?.startsWith('video/') ? '视频片段' : '单张图像' },
-          { title: '结果模式', value: 'Live API' },
-        ],
-    nextSteps: Array.isArray(data.nextSteps) && data.nextSteps.length > 0
-      ? data.nextSteps
-      : ['可以继续对接真实模型字段', '建议补充更多解释性指标'],
+    signals: [
+      {
+        name: '预测置信度',
+        score: toPercent(confidence),
+        detail: `Top-1 类别为 ${formatModelLabel(predictedLabel || 'Unknown')}。`,
+      },
+      {
+        name: '真实概率',
+        score: Number.isFinite(realProbability) ? toPercent(realProbability) : 100 - fakeProbability,
+        detail: '若 Top-1 为 All_Real，则整体更接近真实图像。',
+      },
+    ],
+    timeline: [
+      { title: '输入介质', value: mediaKind === 'video' ? '视频片段' : '单张图像' },
+      { title: '结果模式', value: 'Modal API' },
+      { title: 'Top K', value: String(topK) },
+      { title: '运行设备', value: device || 'unknown' },
+      ...(backbone ? [{ title: '模型主干', value: backbone }] : []),
+      ...(Number.isFinite(numClasses) ? [{ title: '类别数', value: String(numClasses) }] : []),
+    ],
+    nextSteps: isFake
+      ? ['建议补充原始来源链路', '必要时进行人工复核', '可继续查看 Top 5 候选类别']
+      : ['当前更接近真实样本', '仍建议结合来源信息做复核', '可继续观察 Top 5 候选类别'],
     raw: data,
   };
 }
@@ -221,15 +285,25 @@ function parseMultipartForm(req) {
   });
 }
 
-async function forwardToModal(modalUrl, file) {
+async function forwardToModal(modalConfig, file) {
   const fileBuffer = await fs.readFile(file.filepath);
+  const modalUrl = new URL(modalConfig.url);
+  modalUrl.searchParams.set('top_k', String(modalConfig.topK));
+  const formData = new FormData();
+
+  formData.append(
+    'file',
+    new Blob([fileBuffer], { type: file.mimetype || 'application/octet-stream' }),
+    file.originalFilename || 'upload'
+  );
 
   const response = await fetch(modalUrl, {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/octet-stream',
+      'Modal-Key': modalConfig.key,
+      'Modal-Secret': modalConfig.secret,
     },
-    body: fileBuffer,
+    body: formData,
   });
 
   if (!response.ok) {
@@ -247,30 +321,26 @@ export default async function handler(req, res) {
   }
 
   try {
-    const user = await getSessionUser(req);
+    const viewer = await getRequestViewer(req, res);
 
-    if (!user) {
-      return res.status(401).json({ message: 'Please log in before using detection.' });
-    }
-
-    const { files } = await parseMultipartForm(req);
+    const { fields, files } = await parseMultipartForm(req);
     const file = normalizeUploadedFile(files.file);
 
     if (!file) {
       return res.status(400).end('File not provided');
     }
 
-    const quotaResult = await consumeDetectionQuota(user.id);
-    if (!quotaResult.ok) {
-      return res.status(429).json({
-        message: 'Daily detection limit reached.',
-        quota: quotaResult.quota,
-      });
-    }
+    const modalConfig = getModalConfig(req, fields);
 
-    const modalUrl = process.env.MODAL_DETECT_URL;
+    if (!modalConfig.url) {
+      const quotaResult = await consumeDetectionQuota(viewer.quotaKey, viewer.quotaLimit);
+      if (!quotaResult.ok) {
+        return res.status(429).json({
+          message: 'Daily detection limit reached.',
+          quota: quotaResult.quota,
+        });
+      }
 
-    if (!modalUrl) {
       await new Promise((resolve) => setTimeout(resolve, 1100));
       return res.status(200).json({
         ...buildDemoDetection(file),
@@ -278,21 +348,30 @@ export default async function handler(req, res) {
       });
     }
 
+    if (!modalConfig.key || !modalConfig.secret) {
+      return res.status(500).json({
+        message: 'Modal environment is misconfigured. Please set MODAL_KEY and MODAL_SECRET.',
+      });
+    }
+
     try {
-      const liveResult = await forwardToModal(modalUrl, file);
+      const liveResult = await forwardToModal(modalConfig, file);
+      const quotaResult = await consumeDetectionQuota(viewer.quotaKey, viewer.quotaLimit);
+      if (!quotaResult.ok) {
+        return res.status(429).json({
+          message: 'Daily detection limit reached.',
+          quota: quotaResult.quota,
+        });
+      }
+
       return res.status(200).json({
-        ...normalizeLiveResponse(liveResult, file),
+        ...normalizeLiveResponse(liveResult, file, modalConfig.topK),
         quota: quotaResult.quota,
       });
     } catch (error) {
-      console.error('Modal proxy failed, falling back to demo mode:', error);
-      await new Promise((resolve) => setTimeout(resolve, 900));
-
-      return res.status(200).json({
-        ...buildDemoDetection(file),
-        mode: 'demo-fallback',
-        fallbackReason: 'live-endpoint-unavailable',
-        quota: quotaResult.quota,
+      console.error('Modal proxy failed:', error);
+      return res.status(502).json({
+        message: error.message || 'Modal inference request failed.',
       });
     }
   } catch (error) {

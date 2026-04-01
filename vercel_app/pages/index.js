@@ -8,8 +8,7 @@ const ANALYSIS_STAGES = {
 const COPY = {
   zh: {
     brandSub: 'Synthetic Media Detection',
-    login: 'Log in',
-    logout: '退出登录',
+    guestMode: '游客模式',
     language: 'EN',
     title: 'AIGC检测',
     uploadTitle: '上传文件',
@@ -25,7 +24,6 @@ const COPY = {
     chooseFile: '选择文件',
     reselectFile: '重新选择',
     startDetect: '开始检测',
-    loginFirst: '登录后可开始检测',
     detecting: '检测中...',
     analyzing: '正在分析',
     resultTitle: '检测结果',
@@ -35,29 +33,15 @@ const COPY = {
     authentic: '真实内容',
     aiProbability: 'AI生成概率',
     topModels: '最可能的生成模型 Top 5',
-    resultPlaceholder: '登录后上传文件并点击检测，在这里显示结果',
+    resultPlaceholder: '上传文件并点击检测，在这里显示结果',
     unknownType: '未知类型',
     demo: '演示',
     quotaLabel: '今日剩余次数',
-    quotaGuest: '登录后可用，每日 20 次',
-    authTitle: '邮箱验证码登录',
-    authSubtitle: '当前是演示版，发送验证码后会直接在弹窗里显示 mock 验证码。',
-    emailLabel: '邮箱',
-    emailPlaceholder: '请输入邮箱地址',
-    codeLabel: '验证码',
-    codePlaceholder: '请输入 6 位验证码',
-    sendCode: '发送验证码',
-    resendCode: '重新发送',
-    verifyCode: '验证并登录',
-    demoCode: '演示验证码',
-    loggedInAs: '当前账号',
-    quotaUsed: '今日已用',
-    close: '关闭',
+    quotaGuest: '游客可用，每日 5 次',
   },
   en: {
     brandSub: 'Synthetic Media Detection',
-    login: 'Log in',
-    logout: 'Log out',
+    guestMode: 'Guest Mode',
     language: '中',
     title: 'AIGC Detection',
     uploadTitle: 'Upload File',
@@ -73,7 +57,6 @@ const COPY = {
     chooseFile: 'Choose File',
     reselectFile: 'Choose Another',
     startDetect: 'Start Detection',
-    loginFirst: 'Log in to start detection',
     detecting: 'Analyzing...',
     analyzing: 'Analyzing',
     resultTitle: 'Detection Result',
@@ -83,24 +66,11 @@ const COPY = {
     authentic: 'Authentic',
     aiProbability: 'AI Generation Probability',
     topModels: 'Top 5 Suspected Generation Models',
-    resultPlaceholder: 'Log in, upload a file, and start detection to see results here',
+    resultPlaceholder: 'Upload a file and start detection to see results here',
     unknownType: 'Unknown type',
     demo: 'Demo',
     quotaLabel: 'Remaining today',
-    quotaGuest: 'Available after login, 20 per day',
-    authTitle: 'Email Code Login',
-    authSubtitle: 'This demo uses a mock email flow. After sending the code, the popup will display the verification code directly.',
-    emailLabel: 'Email',
-    emailPlaceholder: 'Enter your email address',
-    codeLabel: 'Code',
-    codePlaceholder: 'Enter the 6-digit code',
-    sendCode: 'Send Code',
-    resendCode: 'Resend',
-    verifyCode: 'Verify and Sign In',
-    demoCode: 'Demo code',
-    loggedInAs: 'Signed in as',
-    quotaUsed: 'Used today',
-    close: 'Close',
+    quotaGuest: 'Guest access, 5 detections per day',
   },
 };
 
@@ -131,16 +101,8 @@ export default function Home() {
   const [progress, setProgress] = useState(0);
   const [activeStage, setActiveStage] = useState(-1);
   const [error, setError] = useState('');
-  const [authOpen, setAuthOpen] = useState(false);
   const [user, setUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
-  const [authError, setAuthError] = useState('');
-  const [authMessage, setAuthMessage] = useState('');
-  const [email, setEmail] = useState('');
-  const [code, setCode] = useState('');
-  const [demoCode, setDemoCode] = useState('');
-  const [sendingCode, setSendingCode] = useState(false);
-  const [verifyingCode, setVerifyingCode] = useState(false);
 
   const copy = COPY[locale];
   const stages = ANALYSIS_STAGES[locale];
@@ -212,7 +174,7 @@ export default function Home() {
       try {
         const response = await fetch('/api/auth/me');
         const data = await response.json();
-        setUser(data.user || null);
+        setUser(data.viewer || null);
       } catch {
         setUser(null);
       } finally {
@@ -222,12 +184,6 @@ export default function Home() {
 
     loadMe();
   }, []);
-
-  const resetAuthFeedback = () => {
-    setAuthError('');
-    setAuthMessage('');
-  };
-
   const handleSelectedFile = (selectedFile) => {
     if (!selectedFile) return;
 
@@ -244,97 +200,8 @@ export default function Home() {
     handleSelectedFile(event.dataTransfer.files?.[0] || null);
   };
 
-  const handleSendCode = async () => {
-    resetAuthFeedback();
-    setDemoCode('');
-
-    if (!email.trim()) {
-      setAuthError(locale === 'zh' ? '请先输入邮箱。' : 'Please enter your email first.');
-      return;
-    }
-
-    setSendingCode(true);
-
-    try {
-      const response = await fetch('/api/auth/send-code', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ email }),
-      });
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.message || 'Send code failed');
-      }
-
-      setAuthMessage(locale === 'zh' ? '验证码已发送。' : 'Verification code sent.');
-      setDemoCode(data.demoCode || '');
-    } catch (sendError) {
-      setAuthError(sendError.message || (locale === 'zh' ? '发送失败。' : 'Failed to send code.'));
-    } finally {
-      setSendingCode(false);
-    }
-  };
-
-  const handleVerifyCode = async () => {
-    resetAuthFeedback();
-
-    if (!email.trim() || !code.trim()) {
-      setAuthError(locale === 'zh' ? '请填写邮箱和验证码。' : 'Please enter both email and code.');
-      return;
-    }
-
-    setVerifyingCode(true);
-
-    try {
-      const response = await fetch('/api/auth/verify-code', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ email, code }),
-      });
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.message || 'Verification failed');
-      }
-
-      const meResponse = await fetch('/api/auth/me');
-      const meData = await meResponse.json();
-      setUser(meData.user || data.user || null);
-      setAuthMessage(locale === 'zh' ? '登录成功。' : 'Login successful.');
-      setDemoCode('');
-      setCode('');
-      setAuthOpen(false);
-    } catch (verifyError) {
-      setAuthError(verifyError.message || (locale === 'zh' ? '登录失败。' : 'Login failed.'));
-    } finally {
-      setVerifyingCode(false);
-    }
-  };
-
-  const handleLogout = async () => {
-    await fetch('/api/auth/logout', {
-      method: 'POST',
-    });
-    setUser(null);
-    setResult(null);
-    setAuthOpen(false);
-    setDemoCode('');
-    setCode('');
-  };
-
   const handleSubmit = async (event) => {
     event.preventDefault();
-
-    if (!user) {
-      setAuthOpen(true);
-      setError('');
-      return;
-    }
 
     if (!file || loading) return;
 
@@ -354,15 +221,16 @@ export default function Home() {
       const data = await response.json();
 
       if (!response.ok) {
-        if (response.status === 401) {
-          setAuthOpen(true);
-        }
         throw new Error(data.message || 'Detection request failed');
       }
 
       setResult(data);
-      if (data.quota && user) {
-        setUser({ ...user, quota: data.quota });
+      if (data.quota) {
+        setUser((current) => ({
+          kind: current?.kind || 'guest',
+          email: current?.email || null,
+          quota: data.quota,
+        }));
       }
     } catch (submitError) {
       setError(submitError.message || (locale === 'zh' ? '检测失败' : 'Detection failed'));
@@ -390,9 +258,7 @@ export default function Home() {
           >
             {copy.language}
           </button>
-          <button type="button" className="loginButton" onClick={() => setAuthOpen(true)}>
-            {user?.email || copy.login}
-          </button>
+          <span className="loginButton">{user?.email || copy.guestMode}</span>
         </div>
       </header>
 
@@ -472,7 +338,7 @@ export default function Home() {
               </button>
 
               <button className="primaryButton" type="submit" disabled={!file || loading || authLoading}>
-                {loading ? copy.detecting : user ? copy.startDetect : copy.loginFirst}
+                {loading ? copy.detecting : copy.startDetect}
               </button>
             </div>
 
@@ -572,93 +438,6 @@ export default function Home() {
           </section>
         </section>
       </main>
-
-      {authOpen && (
-        <div className="modalBackdrop" onClick={() => setAuthOpen(false)}>
-          <div className="modalCard" onClick={(event) => event.stopPropagation()}>
-            <div className="modalHead">
-              <div>
-                <h3>{copy.authTitle}</h3>
-                <p>{copy.authSubtitle}</p>
-              </div>
-              <button type="button" className="closeButton" onClick={() => setAuthOpen(false)}>
-                {copy.close}
-              </button>
-            </div>
-
-            {user ? (
-              <div className="accountPanel">
-                <div className="accountRow">
-                  <span>{copy.loggedInAs}</span>
-                  <strong>{user.email}</strong>
-                </div>
-                {user.quota && (
-                  <div className="accountRow">
-                    <span>{copy.quotaUsed}</span>
-                    <strong>{user.quota.used} / {user.quota.limit}</strong>
-                  </div>
-                )}
-                <button type="button" className="primaryButton fullButton" onClick={handleLogout}>
-                  {copy.logout}
-                </button>
-              </div>
-            ) : (
-              <div className="authForm">
-                <label className="field">
-                  <span>{copy.emailLabel}</span>
-                  <input
-                    type="email"
-                    value={email}
-                    onChange={(event) => setEmail(event.target.value)}
-                    placeholder={copy.emailPlaceholder}
-                  />
-                </label>
-
-                <div className="inlineAction">
-                  <label className="field fieldGrow">
-                    <span>{copy.codeLabel}</span>
-                    <input
-                      type="text"
-                      inputMode="numeric"
-                      maxLength={6}
-                      value={code}
-                      onChange={(event) => setCode(event.target.value)}
-                      placeholder={copy.codePlaceholder}
-                    />
-                  </label>
-                  <button
-                    type="button"
-                    className="secondaryButton smallButton"
-                    onClick={handleSendCode}
-                    disabled={sendingCode}
-                  >
-                    {demoCode ? copy.resendCode : copy.sendCode}
-                  </button>
-                </div>
-
-                {demoCode && (
-                  <div className="demoCodeBox">
-                    <span>{copy.demoCode}</span>
-                    <strong>{demoCode}</strong>
-                  </div>
-                )}
-
-                {authMessage && <p className="authMessage">{authMessage}</p>}
-                {authError && <p className="errorText">{authError}</p>}
-
-                <button
-                  type="button"
-                  className="primaryButton fullButton"
-                  onClick={handleVerifyCode}
-                  disabled={verifyingCode}
-                >
-                  {copy.verifyCode}
-                </button>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
 
       <style jsx>{`
         :global(html) {

@@ -48,9 +48,21 @@ structured in three layers:
      npm run dev
      ```
 
-   * When deploying to Vercel, add an environment variable
-     `MODAL_DETECT_URL` with the URL printed by Modal for `detect_web`.
-     Vercel will automatically build and deploy the Next.js app.
+   * When deploying to Vercel, add these environment variables:
+
+     ```bash
+     MODAL_DETECT_URL=https://<your-modal-endpoint>
+     MODAL_KEY=<your-modal-key>
+     MODAL_SECRET=<your-modal-secret>
+     MODAL_TOP_K=5
+     ```
+
+     The current Next.js API route proxies the upload to Modal as
+     `multipart/form-data`, attaches `Modal-Key` and `Modal-Secret`
+     headers, and forwards `top_k` as a query parameter.  If Modal is
+     not configured, the app stays in demo mode; if Modal is
+     configured but unavailable, the API now returns an error instead
+     of silently faking a demo result.
 
 With these components in place, users can visit your Vercel site,
 upload an image, and receive a prediction in a few seconds.

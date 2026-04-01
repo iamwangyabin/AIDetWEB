@@ -1,0 +1,5 @@
+vercel_app/.env.local
+vercel_app/.next
+vercel_app/node_modules
+.data
+vercel_app/.data

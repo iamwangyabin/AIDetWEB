@@ -5,9 +5,12 @@ import path from 'path';
 const STORE_PATH = path.join(process.cwd(), '.data', 'auth-demo-store.json');
 const CODE_TTL_MS = 5 * 60 * 1000;
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const GUEST_TTL_MS = 365 * 24 * 60 * 60 * 1000;
 const SEND_COOLDOWN_MS = 60 * 1000;
 const MAX_DAILY_DETECTIONS = 20;
+const MAX_GUEST_DETECTIONS = 5;
 const SESSION_COOKIE = 'verilens_session';
+const GUEST_COOKIE = 'verilens_guest';
 
 function now() {
   return Date.now();
@@ -79,12 +82,28 @@ function parseCookies(req) {
   }, {});
 }
 
-function buildCookie(token, maxAgeSeconds) {
-  return `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}`;
+function appendSetCookie(res, value) {
+  const current = res.getHeader('Set-Cookie');
+
+  if (!current) {
+    res.setHeader('Set-Cookie', value);
+    return;
+  }
+
+  if (Array.isArray(current)) {
+    res.setHeader('Set-Cookie', [...current, value]);
+    return;
+  }
+
+  res.setHeader('Set-Cookie', [current, value]);
+}
+
+function buildCookie(name, token, maxAgeSeconds) {
+  return `${name}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}`;
 }
 
 export function clearSessionCookie(res) {
-  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+  appendSetCookie(res, `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
 }
 
 export async function sendLoginCode(emailInput) {
@@ -196,7 +215,7 @@ export async function verifyLoginCode(emailInput, codeInput) {
 }
 
 export function setSessionCookie(res, token) {
-  res.setHeader('Set-Cookie', buildCookie(token, Math.floor(SESSION_TTL_MS / 1000)));
+  appendSetCookie(res, buildCookie(SESSION_COOKIE, token, Math.floor(SESSION_TTL_MS / 1000)));
 }
 
 export async function getSessionUser(req) {
@@ -212,7 +231,7 @@ export async function getSessionUser(req) {
   const user = store.users.find((item) => item.id === session.userId && item.status === 'active');
   if (!user) return null;
 
-  const quota = await getUserQuotaByStore(store, user.id);
+  const quota = await getQuotaByStore(store, user.id, MAX_DAILY_DETECTIONS);
 
   return {
     id: user.id,
@@ -222,11 +241,11 @@ export async function getSessionUser(req) {
   };
 }
 
-async function getUserQuotaByStore(store, userId) {
-  let quota = store.quotas.find((item) => item.userId === userId && item.date === todayKey());
+async function getQuotaByStore(store, subjectId, limit) {
+  let quota = store.quotas.find((item) => item.userId === subjectId && item.date === todayKey());
   if (!quota) {
     quota = {
-      userId,
+      userId: subjectId,
       date: todayKey(),
       used: 0,
     };
@@ -236,35 +255,35 @@ async function getUserQuotaByStore(store, userId) {
 
   return {
     used: quota.used,
-    limit: MAX_DAILY_DETECTIONS,
-    remaining: Math.max(0, MAX_DAILY_DETECTIONS - quota.used),
+    limit,
+    remaining: Math.max(0, limit - quota.used),
   };
 }
 
 export async function getUserQuota(userId) {
   const store = await readStore();
-  return getUserQuotaByStore(store, userId);
+  return getQuotaByStore(store, userId, MAX_DAILY_DETECTIONS);
 }
 
-export async function consumeDetectionQuota(userId) {
+export async function consumeDetectionQuota(subjectId, limit = MAX_DAILY_DETECTIONS) {
   const store = await readStore();
-  let quota = store.quotas.find((item) => item.userId === userId && item.date === todayKey());
+  let quota = store.quotas.find((item) => item.userId === subjectId && item.date === todayKey());
 
   if (!quota) {
     quota = {
-      userId,
+      userId: subjectId,
       date: todayKey(),
       used: 0,
     };
     store.quotas.push(quota);
   }
 
-  if (quota.used >= MAX_DAILY_DETECTIONS) {
+  if (quota.used >= limit) {
     return {
       ok: false,
       quota: {
         used: quota.used,
-        limit: MAX_DAILY_DETECTIONS,
+        limit,
         remaining: 0,
       },
     };
@@ -277,9 +296,53 @@ export async function consumeDetectionQuota(userId) {
     ok: true,
     quota: {
       used: quota.used,
-      limit: MAX_DAILY_DETECTIONS,
-      remaining: Math.max(0, MAX_DAILY_DETECTIONS - quota.used),
+      limit,
+      remaining: Math.max(0, limit - quota.used),
     },
+  };
+}
+
+function ensureGuestId(req, res) {
+  const cookies = parseCookies(req);
+  const existing = cookies[GUEST_COOKIE];
+
+  if (existing) {
+    return existing;
+  }
+
+  const guestId = randomId('guest');
+  appendSetCookie(res, buildCookie(GUEST_COOKIE, guestId, Math.floor(GUEST_TTL_MS / 1000)));
+  return guestId;
+}
+
+export async function getRequestViewer(req, res) {
+  const user = await getSessionUser(req);
+
+  if (user) {
+    return {
+      kind: 'user',
+      id: user.id,
+      email: user.email,
+      status: user.status,
+      quota: user.quota,
+      quotaKey: user.id,
+      quotaLimit: MAX_DAILY_DETECTIONS,
+    };
+  }
+
+  const store = await readStore();
+  const guestId = ensureGuestId(req, res);
+  const quotaKey = `guest:${guestId}`;
+  const quota = await getQuotaByStore(store, quotaKey, MAX_GUEST_DETECTIONS);
+
+  return {
+    kind: 'guest',
+    id: guestId,
+    email: null,
+    status: 'guest',
+    quota,
+    quotaKey,
+    quotaLimit: MAX_GUEST_DETECTIONS,
   };
 }
 
