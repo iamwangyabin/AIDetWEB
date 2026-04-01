@@ -2,7 +2,12 @@ import crypto from 'crypto';
 import fs from 'fs/promises';
 import path from 'path';
 
-const STORE_PATH = path.join(process.cwd(), '.data', 'auth-demo-store.json');
+const STORE_DIR = process.env.AUTH_STORE_DIR
+  ? path.resolve(process.env.AUTH_STORE_DIR)
+  : process.env.VERCEL
+    ? '/tmp/verilens'
+    : path.join(process.cwd(), '.data');
+const STORE_PATH = path.join(STORE_DIR, 'auth-demo-store.json');
 const CODE_TTL_MS = 5 * 60 * 1000;
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const GUEST_TTL_MS = 365 * 24 * 60 * 60 * 1000;
